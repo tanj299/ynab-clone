@@ -3,11 +3,18 @@ package com.jaysontan.ynabclone.data
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 
+@Entity(tableName = "persons")
+data class PersonEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val name: String
+)
+
 @Entity(tableName = "accounts")
 data class AccountEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val personId: Long,
     val name: String,
-    val type: String, // Checking, Savings, Credit Card, Cash
+    val type: String,
     val balanceCents: Long
 )
 
@@ -22,10 +29,11 @@ data class CategoryEntity(
 @Entity(tableName = "transactions")
 data class TransactionEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val personId: Long,
     val accountId: Long,
-    val categoryId: Long?, // null = Ready to Assign (Inflow)
+    val categoryId: Long?,
     val payee: String,
     val memo: String = "",
-    val amountCents: Long, // Negative = outflow, Positive = inflow
+    val amountCents: Long,
     val timestamp: Long = System.currentTimeMillis()
 )

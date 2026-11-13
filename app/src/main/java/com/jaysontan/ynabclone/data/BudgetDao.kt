@@ -5,6 +5,9 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface BudgetDao {
+    @Query("SELECT * FROM persons ORDER BY id ASC")
+    fun getAllPersons(): Flow<List<PersonEntity>>
+
     @Query("SELECT * FROM accounts ORDER BY id ASC")
     fun getAllAccounts(): Flow<List<AccountEntity>>
 
@@ -13,6 +16,18 @@ interface BudgetDao {
 
     @Query("SELECT * FROM transactions ORDER BY timestamp DESC")
     fun getAllTransactions(): Flow<List<TransactionEntity>>
+
+    @Insert
+    suspend fun insertPerson(person: PersonEntity): Long
+
+    @Delete
+    suspend fun deletePerson(person: PersonEntity)
+
+    @Query("DELETE FROM accounts WHERE personId = :personId")
+    suspend fun deleteAccountsByPerson(personId: Long)
+
+    @Query("DELETE FROM transactions WHERE personId = :personId")
+    suspend fun deleteTransactionsByPerson(personId: Long)
 
     @Insert
     suspend fun insertAccount(account: AccountEntity): Long
@@ -32,6 +47,6 @@ interface BudgetDao {
     @Delete
     suspend fun deleteTransaction(tx: TransactionEntity)
 
-    @Query("SELECT COUNT(*) FROM accounts")
-    suspend fun getAccountCount(): Int
+    @Query("SELECT COUNT(*) FROM persons")
+    suspend fun getPersonCount(): Int
 }

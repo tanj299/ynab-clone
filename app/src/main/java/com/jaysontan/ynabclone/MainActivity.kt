@@ -2,15 +2,20 @@ package com.jaysontan.ynabclone
 
 import android.os.Build
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -28,6 +33,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.jaysontan.ynabclone.data.AccountEntity
 import com.jaysontan.ynabclone.data.CategoryEntity
+import com.jaysontan.ynabclone.data.PersonEntity
+import com.jaysontan.ynabclone.data.TransactionEntity
 import com.jaysontan.ynabclone.ui.BudgetUiState
 import com.jaysontan.ynabclone.ui.BudgetViewModel
 import com.jaysontan.ynabclone.ui.CategoryBudgetItem
@@ -66,11 +73,28 @@ fun formatCents(cents: Long): String {
 @Composable
 fun ZeroBudgetApp(vm: BudgetViewModel = viewModel()) {
     val state by vm.uiState.collectAsState()
+    val context = LocalContext.current
     var selectedTab by remember { mutableIntStateOf(0) }
     var showAddTxSheet by remember { mutableStateOf(false) }
     var editingCategory by remember { mutableStateOf<CategoryBudgetItem?>(null) }
     var showAddCategoryDialog by remember { mutableStateOf(false) }
     var showAddAccountDialog by remember { mutableStateOf(false) }
+    var showManagePeopleDialog by remember { mutableStateOf(false) }
+
+    val csvExportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("text/csv")
+    ) { uri ->
+        if (uri != null) {
+            try {
+                context.contentResolver.openOutputStream(uri)?.use { stream ->
+                    stream.write(vm.buildCsvContent().toByteArray(Charsets.UTF_8))
+                }
+                Toast.makeText(context, "CSV exported successfully", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                Toast.makeText(context, "Export failed: ", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -80,12 +104,24 @@ fun ZeroBudgetApp(vm: BudgetViewModel = viewModel()) {
                         text = when (selectedTab) {
                             0 -> "Budget"
                             1 -> "Accounts"
-                            else -> "Transactions"
+                            else -> "Activity"
                         },
                         fontWeight = FontWeight.Bold
                     )
                 },
+                navigationIcon = {
+                    IconButton(onClick = { showManagePeopleDialog = true }) {
+                        Icon(Icons.Rounded.Group, contentDescription = "Manage People")
+                    }
+                },
                 actions = {
+                    IconButton(onClick = {
+                        val stamp = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+                        val scopeName = state.persons.find { it.id == state.selectedPersonId }?.name ?: "Household"
+                        csvExportLauncher.launch("ZeroBudget__.csv")
+                    }) {
+                        Icon(Icons.Rounded.FileDownload, contentDescription = "Export CSV")
+                    }
                     if (selectedTab == 0) {
                         IconButton(onClick = { showAddCategoryDialog = true }) {
                             Icon(Icons.Rounded.CreateNewFolder, contentDescription = "Add Category")
@@ -115,7 +151,7 @@ fun ZeroBudgetApp(vm: BudgetViewModel = viewModel()) {
                 NavigationBarItem(
                     selected = selectedTab == 2,
                     onClick = { selectedTab = 2 },
-                    icon = { Icon(Icons.Rounded.ReceiptLong, contentDescription = "Transactions") },
+                    icon = { Icon(Icons.Rounded.ReceiptLong, contentDescription = "Activity") },
                     label = { Text("Activity") }
                 )
             }
@@ -128,22 +164,33 @@ fun ZeroBudgetApp(vm: BudgetViewModel = viewModel()) {
             )
         }
     ) { padding ->
-        Box(modifier = Modifier.padding(padding).fillMaxSize()) {
-            when (selectedTab) {
-                0 -> BudgetScreen(state = state, onCategoryClick = { editingCategory = it })
-                1 -> AccountsScreen(state = state)
-                2 -> TransactionsScreen(state = state, onDelete = { vm.deleteTransaction(it) })
+        Column(modifier = Modifier.padding(padding).fillMaxSize()) {
+            PersonFilterRow(
+                persons = state.persons,
+                selectedPersonId = state.selectedPersonId,
+                onSelectPerson = { vm.selectPerson(it) },
+                onManagePeople = { showManagePeopleDialog = true }
+            )
+
+            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                when (selectedTab) {
+                    0 -> BudgetScreen(state = state, onCategoryClick = { editingCategory = it })
+                    1 -> AccountsScreen(state = state)
+                    2 -> TransactionsScreen(state = state, onDelete = { vm.deleteTransaction(it) })
+                }
             }
         }
     }
 
     if (showAddTxSheet) {
         AddTransactionSheet(
-            accounts = state.accounts,
+            persons = state.persons,
+            accounts = state.allAccounts,
             categories = state.allCategories,
+            defaultPersonId = state.selectedPersonId,
             onDismiss = { showAddTxSheet = false },
-            onSave = { accId, catId, payee, cents ->
-                vm.addTransaction(accId, catId, payee, cents)
+            onSave = { personId, accId, catId, payee, cents ->
+                vm.addTransaction(personId, accId, catId, payee, cents)
                 showAddTxSheet = false
             }
         )
@@ -173,17 +220,71 @@ fun ZeroBudgetApp(vm: BudgetViewModel = viewModel()) {
 
     if (showAddAccountDialog) {
         AddAccountDialog(
+            persons = state.persons,
+            defaultPersonId = state.selectedPersonId,
             onDismiss = { showAddAccountDialog = false },
-            onSave = { name, type, cents ->
-                vm.addAccount(name, type, cents)
+            onSave = { personId, name, type, cents ->
+                vm.addAccount(personId, name, type, cents)
                 showAddAccountDialog = false
             }
+        )
+    }
+
+    if (showManagePeopleDialog) {
+        ManagePeopleDialog(
+            persons = state.persons,
+            accounts = state.allAccounts,
+            onAddPerson = { vm.addPerson(it) },
+            onDeletePerson = { vm.deletePerson(it) },
+            onDismiss = { showManagePeopleDialog = false }
+        )
+    }
+}
+
+@Composable
+fun PersonFilterRow(
+    persons: List<PersonEntity>,
+    selectedPersonId: Long?,
+    onSelectPerson: (Long?) -> Unit,
+    onManagePeople: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        FilterChip(
+            selected = selectedPersonId == null,
+            onClick = { onSelectPerson(null) },
+            label = { Text("All (Household)") },
+            leadingIcon = if (selectedPersonId == null) {
+                { Icon(Icons.Rounded.Check, contentDescription = null, modifier = Modifier.size(16.dp)) }
+            } else null
+        )
+        persons.forEach { person ->
+            val selected = selectedPersonId == person.id
+            FilterChip(
+                selected = selected,
+                onClick = { onSelectPerson(person.id) },
+                label = { Text(person.name) },
+                leadingIcon = if (selected) {
+                    { Icon(Icons.Rounded.Check, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                } else null
+            )
+        }
+        AssistChip(
+            onClick = onManagePeople,
+            label = { Text("+ Person") }
         )
     }
 }
 
 @Composable
 fun BudgetScreen(state: BudgetUiState, onCategoryClick: (CategoryBudgetItem) -> Unit) {
+    val selectedPerson = state.persons.find { it.id == state.selectedPersonId }
     val rtaPositive = state.readyToAssignCents >= 0
     val bannerColor = if (rtaPositive) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.errorContainer
     val bannerTextColor = if (rtaPositive) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onErrorContainer
@@ -200,7 +301,7 @@ fun BudgetScreen(state: BudgetUiState, onCategoryClick: (CategoryBudgetItem) -> 
             ) {
                 Column(modifier = Modifier.padding(20.dp)) {
                     Text(
-                        text = if (rtaPositive) "Ready to Assign" else "Overassigned",
+                        text = if (rtaPositive) "Household Ready to Assign" else "Household Overassigned",
                         style = MaterialTheme.typography.labelLarge,
                         color = bannerTextColor.copy(alpha = 0.8f)
                     )
@@ -210,6 +311,14 @@ fun BudgetScreen(state: BudgetUiState, onCategoryClick: (CategoryBudgetItem) -> 
                         fontWeight = FontWeight.ExtraBold,
                         color = bannerTextColor
                     )
+                    if (selectedPerson != null) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            text = "Viewing 's spending activity",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = bannerTextColor.copy(alpha = 0.85f)
+                        )
+                    }
                 }
             }
         }
@@ -226,11 +335,13 @@ fun BudgetScreen(state: BudgetUiState, onCategoryClick: (CategoryBudgetItem) -> 
             }
             items(items) { item ->
                 val pillColor = when {
+                    selectedPerson != null -> MaterialTheme.colorScheme.secondaryContainer
                     item.availableCents < 0 -> MaterialTheme.colorScheme.errorContainer
                     item.availableCents > 0 -> Color(0xFF1B5E20).copy(alpha = 0.15f)
                     else -> MaterialTheme.colorScheme.surfaceVariant
                 }
                 val pillTextColor = when {
+                    selectedPerson != null -> MaterialTheme.colorScheme.onSecondaryContainer
                     item.availableCents < 0 -> MaterialTheme.colorScheme.onErrorContainer
                     item.availableCents > 0 -> Color(0xFF2E7D32)
                     else -> MaterialTheme.colorScheme.onSurfaceVariant
@@ -248,7 +359,10 @@ fun BudgetScreen(state: BudgetUiState, onCategoryClick: (CategoryBudgetItem) -> 
                         Column(modifier = Modifier.weight(1f)) {
                             Text(item.category.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                             Text(
-                                "Assigned:   •  Spent: ",
+                                if (selectedPerson == null)
+                                    "Assigned:   •  Spent: "
+                                else
+                                    "'s Activity: ",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -276,7 +390,10 @@ fun BudgetScreen(state: BudgetUiState, onCategoryClick: (CategoryBudgetItem) -> 
 
 @Composable
 fun AccountsScreen(state: BudgetUiState) {
-    val netWorth = state.accounts.sumOf { it.balanceCents }
+    val selectedPerson = state.persons.find { it.id == state.selectedPersonId }
+    val personMap = remember(state.persons) { state.persons.associateBy { it.id } }
+    val visibleSum = state.visibleAccounts.sumOf { it.balanceCents }
+
     LazyColumn(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -288,16 +405,27 @@ fun AccountsScreen(state: BudgetUiState) {
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(modifier = Modifier.padding(20.dp)) {
-                    Text("Total Cash / Net Balance", style = MaterialTheme.typography.labelLarge)
                     Text(
-                        text = formatCents(netWorth),
+                        text = if (selectedPerson == null) "Aggregated Household Total" else "'s Total Balance",
+                        style = MaterialTheme.typography.labelLarge
+                    )
+                    Text(
+                        text = formatCents(visibleSum),
                         style = MaterialTheme.typography.headlineMedium.copy(fontFeatureSettings = "tnum"),
                         fontWeight = FontWeight.Bold
                     )
+                    if (selectedPerson != null) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            text = "All Household Combined: ",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
                 }
             }
         }
-        items(state.accounts) { account ->
+        items(state.visibleAccounts) { account ->
+            val ownerName = personMap[account.personId]?.name ?: "Unassigned"
             ElevatedCard(shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
                 Row(
                     modifier = Modifier.padding(16.dp).fillMaxWidth(),
@@ -306,7 +434,11 @@ fun AccountsScreen(state: BudgetUiState) {
                 ) {
                     Column {
                         Text(account.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                        Text(account.type, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(
+                            " • ",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                     Text(
                         text = formatCents(account.balanceCents),
@@ -316,22 +448,49 @@ fun AccountsScreen(state: BudgetUiState) {
                 }
             }
         }
+        item { Spacer(Modifier.height(72.dp)) }
     }
 }
 
 @Composable
-fun TransactionsScreen(state: BudgetUiState, onDelete: (com.jaysontan.ynabclone.data.TransactionEntity) -> Unit) {
+fun TransactionsScreen(state: BudgetUiState, onDelete: (TransactionEntity) -> Unit) {
     val dateFormat = remember { SimpleDateFormat("MMM dd, yyyy", Locale.US) }
     val catMap = remember(state.allCategories) { state.allCategories.associateBy { it.id } }
-    val accMap = remember(state.accounts) { state.accounts.associateBy { it.id } }
+    val accMap = remember(state.allAccounts) { state.allAccounts.associateBy { it.id } }
+    val personMap = remember(state.persons) { state.persons.associateBy { it.id } }
+    val netSum = state.visibleTransactions.sumOf { it.amountCents }
 
     LazyColumn(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        items(state.transactions) { tx ->
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.padding(16.dp).fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Net Activity ( txns)",
+                        style = MaterialTheme.typography.labelLarge
+                    )
+                    Text(
+                        text = formatCents(netSum),
+                        style = MaterialTheme.typography.titleMedium.copy(fontFeatureSettings = "tnum"),
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+        items(state.visibleTransactions) { tx ->
             val catName = tx.categoryId?.let { catMap[it]?.name } ?: "Ready to Assign (Inflow)"
             val accName = accMap[tx.accountId]?.name ?: "Account"
+            val personName = personMap[tx.personId]?.name ?: "Member"
             val isOutflow = tx.amountCents < 0
             ElevatedCard(shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
                 Row(
@@ -342,7 +501,7 @@ fun TransactionsScreen(state: BudgetUiState, onDelete: (com.jaysontan.ynabclone.
                     Column(modifier = Modifier.weight(1f)) {
                         Text(tx.payee, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                         Text(
-                            " •  • ",
+                            " •  •  • ",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -368,16 +527,26 @@ fun TransactionsScreen(state: BudgetUiState, onDelete: (com.jaysontan.ynabclone.
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AddTransactionSheet(
+    persons: List<PersonEntity>,
     accounts: List<AccountEntity>,
     categories: List<CategoryEntity>,
+    defaultPersonId: Long?,
     onDismiss: () -> Unit,
-    onSave: (Long, Long?, String, Long) -> Unit
+    onSave: (Long, Long, Long?, String, Long) -> Unit
 ) {
     var isOutflow by remember { mutableStateOf(true) }
     var amountText by remember { mutableStateOf("") }
     var payee by remember { mutableStateOf("") }
-    var selectedAccount by remember { mutableStateOf(accounts.firstOrNull()) }
+    var selectedPerson by remember {
+        mutableStateOf(persons.find { it.id == defaultPersonId } ?: persons.firstOrNull())
+    }
+    val personAccounts = remember(selectedPerson, accounts) {
+        accounts.filter { it.personId == selectedPerson?.id }.ifEmpty { accounts }
+    }
+    var selectedAccount by remember(personAccounts) { mutableStateOf(personAccounts.firstOrNull()) }
     var selectedCategory by remember { mutableStateOf(categories.firstOrNull()) }
+
+    var personExpanded by remember { mutableStateOf(false) }
     var accExpanded by remember { mutableStateOf(false) }
     var catExpanded by remember { mutableStateOf(false) }
 
@@ -391,6 +560,22 @@ fun AddTransactionSheet(
                 }
                 SegmentedButton(selected = !isOutflow, onClick = { isOutflow = false }, shape = SegmentedButtonDefaults.itemShape(1, 2)) {
                     Text("Inflow (+)")
+                }
+            }
+
+            ExposedDropdownMenuBox(expanded = personExpanded, onExpandedChange = { personExpanded = it }) {
+                OutlinedTextField(
+                    value = selectedPerson?.name ?: "Select Person",
+                    onValueChange = {},
+                    readOnly = true,
+                    label = { Text("Person") },
+                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = personExpanded) },
+                    modifier = Modifier.menuAnchor().fillMaxWidth()
+                )
+                ExposedDropdownMenu(expanded = personExpanded, onDismissRequest = { personExpanded = false }) {
+                    persons.forEach { person ->
+                        DropdownMenuItem(text = { Text(person.name) }, onClick = { selectedPerson = person; personExpanded = false })
+                    }
                 }
             }
 
@@ -421,7 +606,7 @@ fun AddTransactionSheet(
                     modifier = Modifier.menuAnchor().fillMaxWidth()
                 )
                 ExposedDropdownMenu(expanded = accExpanded, onDismissRequest = { accExpanded = false }) {
-                    accounts.forEach { acc ->
+                    personAccounts.forEach { acc ->
                         DropdownMenuItem(text = { Text(acc.name) }, onClick = { selectedAccount = acc; accExpanded = false })
                     }
                 }
@@ -448,11 +633,12 @@ fun AddTransactionSheet(
             Button(
                 onClick = {
                     val rawCents = ((amountText.toDoubleOrNull() ?: 0.0) * 100).roundToLong()
+                    val person = selectedPerson
                     val acc = selectedAccount
-                    if (rawCents > 0 && acc != null) {
+                    if (rawCents > 0 && person != null && acc != null) {
                         val signedCents = if (isOutflow) -rawCents else rawCents
                         val catId = if (isOutflow) selectedCategory?.id else null
-                        onSave(acc.id, catId, payee, signedCents)
+                        onSave(person.id, acc.id, catId, payee, signedCents)
                     }
                 },
                 modifier = Modifier.fillMaxWidth().height(52.dp)
@@ -462,6 +648,72 @@ fun AddTransactionSheet(
             Spacer(Modifier.height(16.dp))
         }
     }
+}
+
+@Composable
+fun ManagePeopleDialog(
+    persons: List<PersonEntity>,
+    accounts: List<AccountEntity>,
+    onAddPerson: (String) -> Unit,
+    onDeletePerson: (PersonEntity) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var newName by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Household Members") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedTextField(
+                        value = newName,
+                        onValueChange = { newName = it },
+                        label = { Text("Add Person Name") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    IconButton(onClick = {
+                        if (newName.isNotBlank()) {
+                            onAddPerson(newName)
+                            newName = ""
+                        }
+                    }) {
+                        Icon(Icons.Rounded.PersonAdd, contentDescription = "Add Person")
+                    }
+                }
+
+                persons.forEach { person ->
+                    val personTotal = accounts.filter { it.personId == person.id }.sumOf { it.balanceCents }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text(person.name, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "Accounts Sum: ",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        if (persons.size > 1) {
+                            IconButton(onClick = { onDeletePerson(person) }) {
+                                Icon(Icons.Rounded.DeleteOutline, contentDescription = "Delete ", tint = MaterialTheme.colorScheme.error)
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Done") }
+        }
+    )
 }
 
 @Composable
@@ -518,16 +770,42 @@ fun AddCategoryDialog(onDismiss: () -> Unit, onSave: (String, String) -> Unit) {
     )
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AddAccountDialog(onDismiss: () -> Unit, onSave: (String, String, Long) -> Unit) {
+fun AddAccountDialog(
+    persons: List<PersonEntity>,
+    defaultPersonId: Long?,
+    onDismiss: () -> Unit,
+    onSave: (Long, String, String, Long) -> Unit
+) {
+    var selectedPerson by remember {
+        mutableStateOf(persons.find { it.id == defaultPersonId } ?: persons.firstOrNull())
+    }
+    var personExpanded by remember { mutableStateOf(false) }
     var name by remember { mutableStateOf("") }
     var type by remember { mutableStateOf("Checking") }
     var balanceText by remember { mutableStateOf("0.00") }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("New Account") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                ExposedDropdownMenuBox(expanded = personExpanded, onExpandedChange = { personExpanded = it }) {
+                    OutlinedTextField(
+                        value = selectedPerson?.name ?: "Select Owner",
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text("Owner") },
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = personExpanded) },
+                        modifier = Modifier.menuAnchor().fillMaxWidth()
+                    )
+                    ExposedDropdownMenu(expanded = personExpanded, onDismissRequest = { personExpanded = false }) {
+                        persons.forEach { person ->
+                            DropdownMenuItem(text = { Text(person.name) }, onClick = { selectedPerson = person; personExpanded = false })
+                        }
+                    }
+                }
                 OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Account Name") }, singleLine = true)
                 OutlinedTextField(value = type, onValueChange = { type = it }, label = { Text("Type (Checking, Savings, Credit)") }, singleLine = true)
                 OutlinedTextField(
@@ -541,9 +819,10 @@ fun AddAccountDialog(onDismiss: () -> Unit, onSave: (String, String, Long) -> Un
         },
         confirmButton = {
             TextButton(onClick = {
-                if (name.isNotBlank()) {
+                val owner = selectedPerson
+                if (name.isNotBlank() && owner != null) {
                     val cents = ((balanceText.toDoubleOrNull() ?: 0.0) * 100).roundToLong()
-                    onSave(name, type, cents)
+                    onSave(owner.id, name, type, cents)
                 }
             }) { Text("Add") }
         },
