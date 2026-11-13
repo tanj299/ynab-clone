@@ -23,7 +23,8 @@ data class CategoryEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val groupName: String,
     val name: String,
-    val assignedCents: Long = 0
+    val assignedCents: Long = 0,
+    val targetCents: Long = 0
 )
 
 @Entity(tableName = "transactions")

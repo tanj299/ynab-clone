@@ -8,6 +8,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -16,6 +17,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -25,7 +27,11 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -38,9 +44,11 @@ import com.jaysontan.ynabclone.data.TransactionEntity
 import com.jaysontan.ynabclone.ui.BudgetUiState
 import com.jaysontan.ynabclone.ui.BudgetViewModel
 import com.jaysontan.ynabclone.ui.CategoryBudgetItem
+import com.jaysontan.ynabclone.ui.ChartSlice
 import java.text.NumberFormat
 import java.text.SimpleDateFormat
 import java.util.*
+import kotlin.math.abs
 import kotlin.math.roundToLong
 
 class MainActivity : ComponentActivity() {
@@ -63,6 +71,17 @@ class MainActivity : ComponentActivity() {
         }
     }
 }
+
+val ChartPalette = listOf(
+    Color(0xFF006C4C), // Emerald
+    Color(0xFF1E88E5), // Royal Blue
+    Color(0xFFFB8C00), // Amber
+    Color(0xFF8E24AA), // Plum
+    Color(0xFFE53935), // Coral Red
+    Color(0xFF00ACC1), // Cyan
+    Color(0xFF43A047), // Leaf Green
+    Color(0xFF5E35B1)  // Indigo
+)
 
 fun formatCents(cents: Long): String {
     val formatter = NumberFormat.getCurrencyInstance(Locale.US)
@@ -104,7 +123,8 @@ fun ZeroBudgetApp(vm: BudgetViewModel = viewModel()) {
                         text = when (selectedTab) {
                             0 -> "Budget"
                             1 -> "Accounts"
-                            else -> "Activity"
+                            2 -> "Activity"
+                            else -> "Reports"
                         },
                         fontWeight = FontWeight.Bold
                     )
@@ -139,7 +159,7 @@ fun ZeroBudgetApp(vm: BudgetViewModel = viewModel()) {
                 NavigationBarItem(
                     selected = selectedTab == 0,
                     onClick = { selectedTab = 0 },
-                    icon = { Icon(Icons.Rounded.PieChart, contentDescription = "Budget") },
+                    icon = { Icon(Icons.Rounded.AccountBalanceWallet, contentDescription = "Budget") },
                     label = { Text("Budget") }
                 )
                 NavigationBarItem(
@@ -154,14 +174,22 @@ fun ZeroBudgetApp(vm: BudgetViewModel = viewModel()) {
                     icon = { Icon(Icons.Rounded.ReceiptLong, contentDescription = "Activity") },
                     label = { Text("Activity") }
                 )
+                NavigationBarItem(
+                    selected = selectedTab == 3,
+                    onClick = { selectedTab = 3 },
+                    icon = { Icon(Icons.Rounded.PieChart, contentDescription = "Reports") },
+                    label = { Text("Reports") }
+                )
             }
         },
         floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = { showAddTxSheet = true },
-                icon = { Icon(Icons.Rounded.Add, contentDescription = "Add") },
-                text = { Text("Transaction") }
-            )
+            if (selectedTab != 3) {
+                ExtendedFloatingActionButton(
+                    onClick = { showAddTxSheet = true },
+                    icon = { Icon(Icons.Rounded.Add, contentDescription = "Add") },
+                    text = { Text("Transaction") }
+                )
+            }
         }
     ) { padding ->
         Column(modifier = Modifier.padding(padding).fillMaxSize()) {
@@ -174,9 +202,15 @@ fun ZeroBudgetApp(vm: BudgetViewModel = viewModel()) {
 
             Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                 when (selectedTab) {
-                    0 -> BudgetScreen(state = state, onCategoryClick = { editingCategory = it })
+                    0 -> BudgetScreen(
+                        state = state,
+                        onCategoryClick = { editingCategory = it },
+                        onCoverOverspending = { vm.coverAllOverspending() },
+                        onFundTargets = { vm.fundUnderfundedTargets() }
+                    )
                     1 -> AccountsScreen(state = state)
                     2 -> TransactionsScreen(state = state, onDelete = { vm.deleteTransaction(it) })
+                    3 -> ReportsScreen(state = state)
                 }
             }
         }
@@ -197,12 +231,17 @@ fun ZeroBudgetApp(vm: BudgetViewModel = viewModel()) {
     }
 
     editingCategory?.let { item ->
-        AssignMoneyDialog(
+        CategoryActionSheet(
             item = item,
+            allCategories = state.allCategories,
             readyToAssignCents = state.readyToAssignCents,
             onDismiss = { editingCategory = null },
-            onSave = { newAssigned ->
-                vm.assignMoney(item.category.id, newAssigned)
+            onSaveBudget = { newAssigned, newTarget ->
+                vm.updateCategoryBudget(item.category.id, newAssigned, newTarget)
+                editingCategory = null
+            },
+            onMoveMoney = { toCategoryId, moveCents ->
+                vm.moveMoney(item.category.id, toCategoryId, moveCents)
                 editingCategory = null
             }
         )
@@ -211,8 +250,8 @@ fun ZeroBudgetApp(vm: BudgetViewModel = viewModel()) {
     if (showAddCategoryDialog) {
         AddCategoryDialog(
             onDismiss = { showAddCategoryDialog = false },
-            onSave = { group, name ->
-                vm.addCategory(group, name)
+            onSave = { group, name, target ->
+                vm.addCategory(group, name, target)
                 showAddCategoryDialog = false
             }
         )
@@ -283,7 +322,12 @@ fun PersonFilterRow(
 }
 
 @Composable
-fun BudgetScreen(state: BudgetUiState, onCategoryClick: (CategoryBudgetItem) -> Unit) {
+fun BudgetScreen(
+    state: BudgetUiState,
+    onCategoryClick: (CategoryBudgetItem) -> Unit,
+    onCoverOverspending: () -> Unit,
+    onFundTargets: () -> Unit
+) {
     val selectedPerson = state.persons.find { it.id == state.selectedPersonId }
     val rtaPositive = state.readyToAssignCents >= 0
     val bannerColor = if (rtaPositive) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.errorContainer
@@ -300,17 +344,67 @@ fun BudgetScreen(state: BudgetUiState, onCategoryClick: (CategoryBudgetItem) -> 
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(modifier = Modifier.padding(20.dp)) {
-                    Text(
-                        text = if (rtaPositive) "Household Ready to Assign" else "Household Overassigned",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = bannerTextColor.copy(alpha = 0.8f)
-                    )
-                    Text(
-                        text = formatCents(state.readyToAssignCents),
-                        style = MaterialTheme.typography.headlineLarge.copy(fontFeatureSettings = "tnum"),
-                        fontWeight = FontWeight.ExtraBold,
-                        color = bannerTextColor
-                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text(
+                                text = if (rtaPositive) "Ready to Assign" else "Overassigned",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = bannerTextColor.copy(alpha = 0.8f)
+                            )
+                            Text(
+                                text = formatCents(state.readyToAssignCents),
+                                style = MaterialTheme.typography.headlineLarge.copy(fontFeatureSettings = "tnum"),
+                                fontWeight = FontWeight.ExtraBold,
+                                color = bannerTextColor
+                            )
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = bannerTextColor.copy(alpha = 0.12f)
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Text("Age of Money", style = MaterialTheme.typography.labelSmall, color = bannerTextColor)
+                                Text(
+                                    " days",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = bannerTextColor
+                                )
+                            }
+                        }
+                    }
+
+                    // YNAB Quick Auto-Assign Actions
+                    if (selectedPerson == null && state.readyToAssignCents > 0 && (state.totalOverspentCents > 0 || state.totalUnderfundedCents > 0)) {
+                        Spacer(Modifier.height(12.dp))
+                        Row(
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            if (state.totalOverspentCents > 0) {
+                                FilledTonalButton(onClick = onCoverOverspending) {
+                                    Icon(Icons.Rounded.AutoFixHigh, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Cover Overspending ()")
+                                }
+                            }
+                            if (state.totalUnderfundedCents > 0) {
+                                FilledTonalButton(onClick = onFundTargets) {
+                                    Icon(Icons.Rounded.Bolt, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Fund Underfunded ()")
+                                }
+                            }
+                        }
+                    }
+
                     if (selectedPerson != null) {
                         Spacer(Modifier.height(4.dp))
                         Text(
@@ -347,37 +441,65 @@ fun BudgetScreen(state: BudgetUiState, onCategoryClick: (CategoryBudgetItem) -> 
                     else -> MaterialTheme.colorScheme.onSurfaceVariant
                 }
 
+                // Target / Spending Progress Bar Calculation
+                val denominator = if (item.category.targetCents > 0) item.category.targetCents else item.category.assignedCents
+                val spentAbs = abs(item.activityCents)
+                val progress = if (denominator > 0) (spentAbs.toFloat() / denominator.toFloat()).coerceIn(0f, 1f) else 0f
+                val progressColor = when {
+                    item.availableCents < 0 -> MaterialTheme.colorScheme.error
+                    item.underfundedCents > 0 && selectedPerson == null -> Color(0xFFFB8C00)
+                    else -> MaterialTheme.colorScheme.primary
+                }
+
                 ElevatedCard(
                     modifier = Modifier.fillMaxWidth().clickable { onCategoryClick(item) },
                     shape = RoundedCornerShape(14.dp)
                 ) {
-                    Row(
-                        modifier = Modifier.padding(16.dp).fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(item.category.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                            Text(
-                                if (selectedPerson == null)
-                                    "Assigned:   •  Spent: "
-                                else
-                                    "'s Activity: ",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(50))
-                                .background(pillColor)
-                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                    Column(modifier = Modifier.padding(16.dp).fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Text(
-                                text = formatCents(item.availableCents),
-                                style = MaterialTheme.typography.labelLarge.copy(fontFeatureSettings = "tnum"),
-                                fontWeight = FontWeight.Bold,
-                                color = pillTextColor
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(item.category.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                                val subtext = if (selectedPerson == null) {
+                                    buildString {
+                                        append("Assigned: ")
+                                        if (item.category.targetCents > 0) append(" / ")
+                                        append("  •  Spent: ")
+                                    }
+                                } else {
+                                    "'s Activity: "
+                                }
+                                Text(
+                                    text = subtext,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(50))
+                                    .background(pillColor)
+                                    .padding(horizontal = 12.dp, vertical = 6.dp)
+                            ) {
+                                Text(
+                                    text = formatCents(item.availableCents),
+                                    style = MaterialTheme.typography.labelLarge.copy(fontFeatureSettings = "tnum"),
+                                    fontWeight = FontWeight.Bold,
+                                    color = pillTextColor
+                                )
+                            }
+                        }
+
+                        if (denominator > 0) {
+                            Spacer(Modifier.height(10.dp))
+                            LinearProgressIndicator(
+                                progress = { progress },
+                                modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
+                                color = progressColor,
+                                trackColor = MaterialTheme.colorScheme.surfaceVariant
                             )
                         }
                     }
@@ -385,6 +507,168 @@ fun BudgetScreen(state: BudgetUiState, onCategoryClick: (CategoryBudgetItem) -> 
             }
         }
         item { Spacer(Modifier.height(72.dp)) }
+    }
+}
+
+@Composable
+fun ReportsScreen(state: BudgetUiState) {
+    val selectedPerson = state.persons.find { it.id == state.selectedPersonId }
+    val totalCategorySpend = state.categorySpendSlices.sumOf { it.amountCents }
+    val totalHouseholdSpend = state.personSpendSlices.sumOf { it.amountCents }
+
+    LazyColumn(
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        // KPI Summary Row
+        item {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("Age of Money", style = MaterialTheme.typography.labelMedium)
+                        Text(
+                            " Days",
+                            style = MaterialTheme.typography.headlineSmall,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                    }
+                }
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("Total Outflow", style = MaterialTheme.typography.labelMedium)
+                        Text(
+                            formatCents(totalCategorySpend),
+                            style = MaterialTheme.typography.headlineSmall.copy(fontFeatureSettings = "tnum"),
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                    }
+                }
+            }
+        }
+
+        // Pie / Donut Chart 1: Spending by Category
+        item {
+            ElevatedCard(shape = RoundedCornerShape(20.dp), modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(20.dp)) {
+                    Text(
+                        text = if (selectedPerson == null) "Household Spending by Category" else "'s Spending by Category",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    if (state.categorySpendSlices.isEmpty()) {
+                        Text(
+                            "No outflow transactions recorded for this view yet.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    } else {
+                        DonutPieChartWithLegend(
+                            slices = state.categorySpendSlices,
+                            centerTitle = "Spent",
+                            centerValue = formatCents(totalCategorySpend)
+                        )
+                    }
+                }
+            }
+        }
+
+        // Pie / Donut Chart 2: Household Spending Share by Person
+        if (state.personSpendSlices.size > 1) {
+            item {
+                ElevatedCard(shape = RoundedCornerShape(20.dp), modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(20.dp)) {
+                        Text(
+                            text = "Household Spending Split by Person",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(Modifier.height(16.dp))
+                        DonutPieChartWithLegend(
+                            slices = state.personSpendSlices,
+                            centerTitle = "Combined",
+                            centerValue = formatCents(totalHouseholdSpend)
+                        )
+                    }
+                }
+            }
+        }
+
+        item { Spacer(Modifier.height(32.dp)) }
+    }
+}
+
+@Composable
+fun DonutPieChartWithLegend(
+    slices: List<ChartSlice>,
+    centerTitle: String,
+    centerValue: String
+) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
+        Box(contentAlignment = Alignment.Center, modifier = Modifier.size(210.dp)) {
+            Canvas(modifier = Modifier.size(200.dp)) {
+                val strokeWidth = 38.dp.toPx()
+                val radius = (size.minDimension - strokeWidth) / 2f
+                val topLeft = Offset((size.width - radius * 2f) / 2f, (size.height - radius * 2f) / 2f)
+                val arcSize = Size(radius * 2f, radius * 2f)
+
+                var startAngle = -90f
+                slices.forEachIndexed { index, slice ->
+                    val sweepAngle = (slice.percentage / 100f) * 360f
+                    val gap = if (slices.size > 1) 2f else 0f
+                    drawArc(
+                        color = ChartPalette[index % ChartPalette.size],
+                        startAngle = startAngle + gap / 2f,
+                        sweepAngle = (sweepAngle - gap).coerceAtLeast(1f),
+                        useCenter = false,
+                        topLeft = topLeft,
+                        size = arcSize,
+                        style = Stroke(width = strokeWidth, cap = StrokeCap.Butt)
+                    )
+                    startAngle += sweepAngle
+                }
+            }
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(centerTitle, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(
+                    centerValue,
+                    style = MaterialTheme.typography.titleMedium.copy(fontFeatureSettings = "tnum"),
+                    fontWeight = FontWeight.ExtraBold
+                )
+            }
+        }
+
+        Spacer(Modifier.height(16.dp))
+
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            slices.forEachIndexed { index, slice ->
+                val color = ChartPalette[index % ChartPalette.size]
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                        Box(modifier = Modifier.size(12.dp).clip(CircleShape).background(color))
+                        Spacer(Modifier.width(10.dp))
+                        Text(slice.label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                    }
+                    Text(
+                        text = " (%)",
+                        style = MaterialTheme.typography.bodyMedium.copy(fontFeatureSettings = "tnum"),
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -521,6 +805,112 @@ fun TransactionsScreen(state: BudgetUiState, onDelete: (TransactionEntity) -> Un
             }
         }
         item { Spacer(Modifier.height(72.dp)) }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun CategoryActionSheet(
+    item: CategoryBudgetItem,
+    allCategories: List<CategoryEntity>,
+    readyToAssignCents: Long,
+    onDismiss: () -> Unit,
+    onSaveBudget: (Long, Long) -> Unit,
+    onMoveMoney: (Long, Long) -> Unit
+) {
+    var mode by remember { mutableIntStateOf(0) } // 0 = Assign & Target, 1 = Move Money
+    var assignedText by remember { mutableStateOf(String.format(Locale.US, "%.2f", item.category.assignedCents / 100.0)) }
+    var targetText by remember { mutableStateOf(String.format(Locale.US, "%.2f", item.category.targetCents / 100.0)) }
+
+    val otherCategories = remember(allCategories, item) { allCategories.filter { it.id != item.category.id } }
+    var targetCategory by remember { mutableStateOf(otherCategories.firstOrNull()) }
+    var moveAmountText by remember { mutableStateOf("") }
+    var catDropdownExpanded by remember { mutableStateOf(false) }
+
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(modifier = Modifier.padding(20.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(item.category.name, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Text(
+                "Available:   •  Ready to Assign: ",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                SegmentedButton(selected = mode == 0, onClick = { mode = 0 }, shape = SegmentedButtonDefaults.itemShape(0, 2)) {
+                    Text("Assign & Target")
+                }
+                SegmentedButton(selected = mode == 1, onClick = { mode = 1 }, shape = SegmentedButtonDefaults.itemShape(1, 2)) {
+                    Text("Move Money")
+                }
+            }
+
+            if (mode == 0) {
+                OutlinedTextField(
+                    value = assignedText,
+                    onValueChange = { assignedText = it },
+                    label = { Text("Assigned Amount ($)") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+                OutlinedTextField(
+                    value = targetText,
+                    onValueChange = { targetText = it },
+                    label = { Text("Monthly Target / Goal ($)") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+                Button(
+                    onClick = {
+                        val assignedCents = ((assignedText.toDoubleOrNull() ?: 0.0) * 100).roundToLong()
+                        val targetCents = ((targetText.toDoubleOrNull() ?: 0.0) * 100).roundToLong()
+                        onSaveBudget(assignedCents, targetCents)
+                    },
+                    modifier = Modifier.fillMaxWidth().height(50.dp)
+                ) {
+                    Text("Save Budget & Target")
+                }
+            } else {
+                OutlinedTextField(
+                    value = moveAmountText,
+                    onValueChange = { moveAmountText = it },
+                    label = { Text("Amount to Move ($)") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+                ExposedDropdownMenuBox(expanded = catDropdownExpanded, onExpandedChange = { catDropdownExpanded = it }) {
+                    OutlinedTextField(
+                        value = targetCategory?.name ?: "Select Destination Category",
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text("Move To Category") },
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = catDropdownExpanded) },
+                        modifier = Modifier.menuAnchor().fillMaxWidth()
+                    )
+                    ExposedDropdownMenu(expanded = catDropdownExpanded, onDismissRequest = { catDropdownExpanded = false }) {
+                        otherCategories.forEach { cat ->
+                            DropdownMenuItem(text = { Text(": ") }, onClick = { targetCategory = cat; catDropdownExpanded = false })
+                        }
+                    }
+                }
+                Button(
+                    onClick = {
+                        val moveCents = ((moveAmountText.toDoubleOrNull() ?: 0.0) * 100).roundToLong()
+                        val dest = targetCategory
+                        if (moveCents > 0 && dest != null) {
+                            onMoveMoney(dest.id, moveCents)
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().height(50.dp)
+                ) {
+                    Text("Transfer Envelope Funds")
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+        }
     }
 }
 
@@ -717,43 +1107,10 @@ fun ManagePeopleDialog(
 }
 
 @Composable
-fun AssignMoneyDialog(
-    item: CategoryBudgetItem,
-    readyToAssignCents: Long,
-    onDismiss: () -> Unit,
-    onSave: (Long) -> Unit
-) {
-    var assignedText by remember { mutableStateOf(String.format(Locale.US, "%.2f", item.category.assignedCents / 100.0)) }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Assign to ") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Ready to Assign: ", style = MaterialTheme.typography.bodyMedium)
-                OutlinedTextField(
-                    value = assignedText,
-                    onValueChange = { assignedText = it },
-                    label = { Text("Total Assigned ($)") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                    singleLine = true
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = {
-                val cents = ((assignedText.toDoubleOrNull() ?: 0.0) * 100).roundToLong()
-                onSave(cents)
-            }) { Text("Save") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
-    )
-}
-
-@Composable
-fun AddCategoryDialog(onDismiss: () -> Unit, onSave: (String, String) -> Unit) {
+fun AddCategoryDialog(onDismiss: () -> Unit, onSave: (String, String, Long) -> Unit) {
     var group by remember { mutableStateOf("Everyday Living") }
     var name by remember { mutableStateOf("") }
+    var targetText by remember { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("New Category") },
@@ -761,10 +1118,22 @@ fun AddCategoryDialog(onDismiss: () -> Unit, onSave: (String, String) -> Unit) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(value = group, onValueChange = { group = it }, label = { Text("Category Group") }, singleLine = true)
                 OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Category Name") }, singleLine = true)
+                OutlinedTextField(
+                    value = targetText,
+                    onValueChange = { targetText = it },
+                    label = { Text("Monthly Target ($ - Optional)") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    singleLine = true
+                )
             }
         },
         confirmButton = {
-            TextButton(onClick = { if (name.isNotBlank()) onSave(group, name) }) { Text("Add") }
+            TextButton(onClick = {
+                if (name.isNotBlank()) {
+                    val targetCents = ((targetText.toDoubleOrNull() ?: 0.0) * 100).roundToLong()
+                    onSave(group, name, targetCents)
+                }
+            }) { Text("Add") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
     )

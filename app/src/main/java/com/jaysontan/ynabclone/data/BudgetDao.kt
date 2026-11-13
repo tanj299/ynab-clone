@@ -32,14 +32,20 @@ interface BudgetDao {
     @Insert
     suspend fun insertAccount(account: AccountEntity): Long
 
+    @Delete
+    suspend fun deleteAccount(account: AccountEntity)
+
     @Query("UPDATE accounts SET balanceCents = balanceCents + :deltaCents WHERE id = :accountId")
     suspend fun adjustAccountBalance(accountId: Long, deltaCents: Long)
 
     @Insert
     suspend fun insertCategory(category: CategoryEntity): Long
 
-    @Query("UPDATE categories SET assignedCents = :assignedCents WHERE id = :categoryId")
-    suspend fun updateCategoryAssigned(categoryId: Long, assignedCents: Long)
+    @Query("UPDATE categories SET assignedCents = :assignedCents, targetCents = :targetCents WHERE id = :categoryId")
+    suspend fun updateCategoryBudget(categoryId: Long, assignedCents: Long, targetCents: Long)
+
+    @Query("UPDATE categories SET assignedCents = assignedCents + :deltaCents WHERE id = :categoryId")
+    suspend fun adjustCategoryAssigned(categoryId: Long, deltaCents: Long)
 
     @Insert
     suspend fun insertTransaction(tx: TransactionEntity): Long
